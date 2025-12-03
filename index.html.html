@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OPAT 療程動態儀表板</title>
+    
+    <!-- 1. 載入 Tailwind CSS (樣式) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 2. 設定 Import Map -->
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "firebase/app": "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js",
+        "firebase/firestore": "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js",
+        "firebase/auth": "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js"
+      }
+    }
+    </script>
+
+    <!-- 3. 載入 Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-gray-50">
+
+    <div id="root"></div>
+
+    <!-- 4. 主要程式碼邏輯 -->
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useMemo } from 'react';
+        import ReactDOM from 'react-dom/client';
+        import { initializeApp } from "firebase/app";
+        import { 
+          getFirestore, collection, addDoc, deleteDoc, 
+          doc, onSnapshot, query, orderBy 
+        } from "firebase/firestore";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "firebase/auth";
+
+        // ==========================================
+        // Firebase 正式版設定
+        // ==========================================
+        
+        // ★★★ 請確認以下資訊與您的 Firebase Console 一致 ★★★
+        const firebaseConfig = {
+            apiKey: "AIzaSyCeTssCIOxG19K2ud6Jo7s6ZsXogsHyTy0",
+            authDomain: "opat-dashboard.firebaseapp.com",
+            projectId: "opat-dashboard",
+            storageBucket: "opat-dashboard.firebasestorage.app",
+            messagingSenderId: "1009711799876",
+            appId: "1:1009711799876:web:41d62bba1735e000eca611"
+        };
+
+        // 初始化 Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        
+        // 設定正式資料庫集合名稱
+        const COLLECTION_NAME = 'opat_patients';
+
+        // --- 圖示元件 ---
+        const Icon = ({ children, className }) => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>{children}</svg>;
+        const Activity = ({size}) => <Icon className={`w-${size/4} h-${size/4}`}><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></Icon>;
+        const Plus = ({size}) => <Icon className={`w-${size/4} h-${size/4}`}><path d="M5 12h14"/><path d="M12 5v14"/></Icon>;
+        const Trash2 = ({size}) => <Icon className={`w-${size/4} h-${size/4}`}><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></Icon>;
+        const Users = ({className}) => <Icon className={className}><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></Icon>;
+        const Lock = ({size, className}) => <Icon className={className || `w-${size/4} h-${size/4}`}><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></Icon>;
+        const Calendar = ({size, className}) => <Icon className={className || `w-${size/4} h-${size/4}`}><rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/></Icon>;
+        const AlertCircle = ({size}) => <Icon className={`w-${size/4} h-${size/4}`}><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></Icon>;
+
+        const OPATDashboard = () => {
+          const [user, setUser] = useState(null);
+          const [patients, setPatients] = useState([]);
+          const [loading, setLoading] = useState(true);
+          const [error, setError] = useState(null);
+          const [authErrorType, setAuthErrorType] = useState(null); // 用於判斷錯誤類型顯示對應引導
+
+          const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+          const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+          const [newChartNo, setNewChartNo] = useState('');
+          const [newStartDate, setNewStartDate] = useState('');
+          const [passwordInput, setPasswordInput] = useState('');
+          const [selectedPatientId, setSelectedPatientId] = useState(null);
+          const [actionErrorMsg, setActionErrorMsg] = useState('');
+
+          const ADD_PASSWORD = "5323911@";
+          const DELETE_PASSWORD = "53267@";
+
+          // --- 1. 身份驗證 ---
+          useEffect(() => {
+            const initAuth = async () => {
+                try {
+                     // 正式版使用匿名登入
+                     await signInAnonymously(auth);
+                } catch (err) {
+                    console.error("Auth error:", err);
+                    let msg = "連線錯誤：" + err.message;
+                    let type = "general";
+
+                    // 針對常見錯誤提供中文引導
+                    if (err.code === 'auth/network-request-failed') {
+                         msg = "連線失敗：請檢查網路，或確認 HTML 內的 firebaseConfig 設定正確。";
+                         type = "network";
+                    } else if (err.code === 'auth/configuration-not-found' || err.code === 'auth/operation-not-allowed') {
+                         msg = "尚未啟用驗證功能";
+                         type = "config"; // 標記為設定問題，顯示詳細引導
+                    } else if (err.code === 'auth/admin-restricted-operation') {
+                         msg = "管理員限制：請確認您已在 Firebase Console 啟用匿名登入。";
+                         type = "config";
+                    }
+                    setError(msg);
+                    setAuthErrorType(type);
+                }
+            };
+            initAuth();
+
+            return onAuthStateChanged(auth, (currentUser) => {
+              setUser(currentUser);
+              if (currentUser) {
+                  setError(null);
+                  setAuthErrorType(null);
+              }
+            });
+          }, []);
+
+          // --- 2. 資料同步 ---
+          useEffect(() => {
+            if (!user) return; // 等待登入
+
+            // 使用正式路徑
+            const q = query(collection(db, COLLECTION_NAME));
+
+            const unsubscribe = onSnapshot(q, (snapshot) => {
+                const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                data.sort((a, b) => new Date(a.startDate) - new Date(b.startDate));
+                setPatients(data);
+                setLoading(false);
+            }, (err) => {
+                console.error(err);
+                if (err.code === 'permission-denied') {
+                     setError("權限不足：如果您在 Firebase Console 選擇了「正式版」規則，請務必修改 Rules 為允許讀寫 (例如: allow read, write: if request.auth != null;)");
+                } else {
+                     setError("資料讀取錯誤: " + err.message);
+                }
+                setLoading(false);
+            });
+            return () => unsubscribe();
+          }, [user]);
+
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+
+          const viewStartDate = useMemo(() => {
+            if (patients.length === 0) return today;
+            let earliest = new Date(patients[0].startDate);
+            patients.forEach(p => {
+              const d = new Date(p.startDate);
+              if (d < earliest) earliest = d;
+            });
+            earliest.setHours(0,0,0,0);
+            return earliest;
+          }, [patients]);
+
+          const dateRange = useMemo(() => {
+            const dates = [];
+            let startPoint = new Date(viewStartDate);
+            const diffTime = today - startPoint;
+            const diffDaysFromToday = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            
+            if (diffDaysFromToday > 10) {
+               startPoint = new Date(today);
+               startPoint.setDate(today.getDate() - 5);
+            }
+
+            for (let i = 0; i < 14; i++) {
+              const d = new Date(startPoint);
+              d.setDate(startPoint.getDate() + i);
+              dates.push(d);
+            }
+            return dates;
+          }, [viewStartDate]);
+
+          const getDayStatus = (patientStartStr, currentDate) => {
+            const start = new Date(patientStartStr);
+            start.setHours(0,0,0,0);
+            const current = new Date(currentDate);
+            current.setHours(0,0,0,0);
+            const diffDays = Math.round((current - start) / (1000 * 60 * 60 * 24)); 
+            if (diffDays >= 0 && diffDays < 5) return `Day ${diffDays + 1}`;
+            else if (diffDays >= 5) return "完成";
+            return null;
+          };
+
+          const handleAddSubmit = async (e) => {
+            e.preventDefault();
+            setActionErrorMsg("");
+            if (passwordInput !== ADD_PASSWORD) return setActionErrorMsg("密碼錯誤！");
+            if (!user) return setActionErrorMsg("系統尚未連線");
+
+            try {
+              await addDoc(collection(db, COLLECTION_NAME), {
+                chartNo: newChartNo,
+                startDate: newStartDate, 
+                createdAt: new Date().toISOString()
+              });
+              closeModals();
+            } catch (error) {
+              console.error(error);
+              setActionErrorMsg("新增失敗: " + error.message);
+            }
+          };
+
+          const handleDeleteSubmit = async (e) => {
+            e.preventDefault();
+            setActionErrorMsg("");
+            if (passwordInput !== DELETE_PASSWORD) return setActionErrorMsg("密碼錯誤！");
+            try {
+              await deleteDoc(doc(db, COLLECTION_NAME, selectedPatientId));
+              closeModals();
+            } catch (error) {
+              console.error(error);
+              setActionErrorMsg("刪除失敗");
+            }
+          };
+
+          const closeModals = () => {
+            setIsAddModalOpen(false); setIsDeleteModalOpen(false);
+            setNewChartNo(''); setNewStartDate(''); setPasswordInput(''); setActionErrorMsg(''); setSelectedPatientId(null);
+          };
+
+          const formatDate = (date) => `${date.getMonth() + 1}/${date.getDate()}`;
+          const getWeekDay = (date) => ['日', '一', '二', '三', '四', '五', '六'][date.getDay()];
+          const isToday = (date) => date.getTime() === today.getTime();
+
+          const getStatusColor = (status) => {
+            if (!status) return "";
+            if (status === "Day 1") return "bg-blue-100 text-blue-800 font-bold border-blue-200";
+            if (status === "Day 2") return "bg-cyan-100 text-cyan-800 font-bold border-cyan-200";
+            if (status === "Day 3") return "bg-indigo-100 text-indigo-800 font-bold border-indigo-200";
+            if (status === "Day 4") return "bg-violet-100 text-violet-800 font-bold border-violet-200";
+            if (status === "Day 5") return "bg-fuchsia-100 text-fuchsia-800 font-bold border-fuchsia-200";
+            if (status === "完成") return "bg-gray-100 text-gray-400 italic";
+            return "";
+          };
+
+          return (
+            <div className="min-h-screen bg-gray-50 font-sans text-gray-800 p-4 md:p-8 max-w-[1600px] mx-auto">
+              <header className="flex flex-col md:flex-row justify-between items-center mb-6 bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+                <div className="mb-4 md:mb-0">
+                  <h1 className="text-3xl font-bold text-blue-900 flex items-center gap-3">
+                    <div className="text-blue-600"><Activity size={32} /></div>
+                    OPAT 療程動態儀表板
+                  </h1>
+                  <div className="text-gray-500 mt-2 flex items-center gap-2">
+                    <span className={`text-xs px-2 py-1 rounded-full flex items-center gap-1 ${user ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                       <span className={`block w-2 h-2 rounded-full ${user ? 'bg-green-500' : 'bg-red-500'}`}></span>
+                       {user ? '已連線同步中' : '尚未連線'}
+                    </span>
+                    標準療程：5天
+                  </div>
+                </div>
+                <button 
+                  onClick={() => { setNewStartDate(new Date().toISOString().split('T')[0]); setIsAddModalOpen(true); }}
+                  disabled={!user}
+                  className={`px-6 py-3 rounded-lg shadow-md flex items-center gap-2 transition transform hover:-translate-y-0.5 ${!user ? 'bg-gray-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}
+                >
+                  <Plus size={20} /> 新增病人收案
+                </button>
+              </header>
+
+              {error && (
+                  <div className="mb-6 bg-red-50 border-l-4 border-red-500 p-4 text-red-700">
+                    <div className="flex items-center gap-2 font-bold mb-2">
+                         <AlertCircle size={20}/> {error}
+                    </div>
+                    {authErrorType === 'config' && (
+                        <div className="bg-white p-3 rounded border border-red-100 text-sm">
+                            <p className="mb-2 font-bold text-gray-700">解決方法：</p>
+                            <ol className="list-decimal pl-5 space-y-1 text-gray-600">
+                                <li>前往 <a href="https://console.firebase.google.com/" target="_blank" className="text-blue-600 underline">Firebase Console</a>。</li>
+                                <li>點擊左側選單的 <strong>Authentication (身分驗證)</strong>。</li>
+                                <li>點擊 <strong>開始使用 (Get started)</strong>。</li>
+                                <li>點擊 <strong>登入方式 (Sign-in method)</strong> 分頁。</li>
+                                <li>啟用 <strong>匿名 (Anonymous)</strong> 登入並儲存。</li>
+                            </ol>
+                            <p className="mt-2 text-xs text-gray-500">完成後請重新整理此網頁。</p>
+                        </div>
+                    )}
+                  </div>
+              )}
+
+              {/* 甘特圖區塊 */}
+              <div className="bg-white rounded-xl shadow-sm overflow-hidden mb-8 border border-gray-200 flex flex-col">
+                <div className="p-4 bg-gray-50 border-b border-gray-200 flex items-center gap-2">
+                  <Calendar size={18} className="text-gray-600"/>
+                  <h2 className="font-bold text-gray-700">療程進度總覽</h2>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[1000px] border-collapse">
+                    <thead>
+                      <tr>
+                        <th className="p-4 border-b border-r bg-gray-100 text-left sticky left-0 z-20 w-40 bg-gray-100">病歷號</th>
+                        {dateRange.map((date, idx) => (
+                          <th key={idx} className={`p-2 border-b text-center min-w-[90px] relative ${isToday(date) ? 'bg-yellow-100 text-yellow-900 border-b-yellow-300' : 'bg-gray-50 text-gray-600'}`}>
+                            <div className={`font-bold text-lg ${isToday(date) ? 'text-yellow-800' : ''}`}>{formatDate(date)}</div>
+                            <div className="text-xs">週{getWeekDay(date)}</div>
+                            {isToday(date) && <div className="absolute top-0 left-0 w-full h-1 bg-yellow-400"></div>}
+                          </th>
+                        ))}
+                        <th className="p-2 border-b bg-gray-50 text-center w-20 sticky right-0 z-10 bg-gray-100">管理</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {loading ? <tr><td colSpan="100" className="p-12 text-center text-gray-400">載入中...</td></tr> : 
+                       patients.length === 0 ? <tr><td colSpan="100" className="p-12 text-center text-gray-400 italic">目前無收案資料</td></tr> : 
+                       patients.map((patient) => (
+                        <tr key={patient.id} className="hover:bg-gray-50 transition group">
+                          <td className="p-3 border-b border-r font-bold text-gray-700 sticky left-0 bg-white z-20 shadow-sm">{patient.chartNo}</td>
+                          {dateRange.map((date, idx) => {
+                            const status = getDayStatus(patient.startDate, date);
+                            return (
+                              <td key={idx} className={`p-2 border-b border-r border-dashed border-gray-100 text-center ${isToday(date) ? 'bg-yellow-50' : ''}`}>
+                                {status && <div className={`mx-auto py-1 px-2 rounded-md text-sm shadow-sm whitespace-nowrap ${getStatusColor(status)}`}>{status}</div>}
+                              </td>
+                            );
+                          })}
+                          <td className="p-2 border-b text-center sticky right-0 bg-white z-10 shadow-sm">
+                            <button onClick={() => { setSelectedPatientId(patient.id); setIsDeleteModalOpen(true); }} className="text-gray-300 hover:text-red-500 p-2"><Trash2 size={18} /></button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* 每日工作量統計 */}
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                <div className="p-5 border-b bg-gray-50 flex items-center justify-between">
+                  <div className="flex items-center gap-2"><Users className="text-green-600" size={20} /><h2 className="text-lg font-bold text-gray-800">每日注射名單統計</h2></div>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-gray-100 text-gray-600 text-sm">
+                        <th className="p-4 border-b w-40">日期</th>
+                        <th className="p-4 border-b w-32 text-center">預計人數</th>
+                        <th className="p-4 border-b">預計施打病歷號</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dateRange.map((date, idx) => {
+                        const patientsToday = patients.filter(p => {
+                          const status = getDayStatus(p.startDate, date);
+                          return status && status.startsWith("Day");
+                        });
+                        if (patientsToday.length === 0 && !isToday(date) && idx > 5) return null;
+                        const isRowToday = isToday(date);
+                        return (
+                          <tr key={idx} className={`border-b last:border-0 hover:bg-gray-50 ${isRowToday ? 'bg-yellow-50' : ''}`}>
+                            <td className="p-4 font-bold text-gray-700">
+                              {date.getFullYear()}/{formatDate(date)} <span className="text-xs font-normal text-gray-500">週{getWeekDay(date)}</span>
+                              {isRowToday && <span className="text-xs text-yellow-600 font-bold ml-2">TODAY</span>}
+                            </td>
+                            <td className="p-4 text-center">
+                              {patientsToday.length > 0 ? <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-green-100 text-green-700 font-bold text-sm">{patientsToday.length}</span> : <span className="text-gray-300">-</span>}
+                            </td>
+                            <td className="p-4">
+                              <div className="flex flex-wrap gap-2">
+                                {patientsToday.map(p => (
+                                  <div key={p.id} className="flex items-center border px-3 py-1.5 rounded-lg shadow-sm bg-white border-gray-200">
+                                    <span className="font-medium mr-2">{p.chartNo}</span>
+                                    <span className="text-xs opacity-75 bg-gray-100 px-1.5 rounded">D{getDayStatus(p.startDate, date).split(' ')[1]}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              
+              {/* Modals 簡化處理 */}
+              {isAddModalOpen && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                  <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-2xl">
+                    <h3 className="text-xl font-bold mb-4">新增收案</h3>
+                    <form onSubmit={handleAddSubmit} className="space-y-4">
+                      <input type="text" required value={newChartNo} onChange={e => setNewChartNo(e.target.value)} className="w-full border rounded p-2" placeholder="病歷號" />
+                      <input type="date" required value={newStartDate} onChange={e => setNewStartDate(e.target.value)} className="w-full border rounded p-2" />
+                      <input type="password" required value={passwordInput} onChange={e => setPasswordInput(e.target.value)} className="w-full border rounded p-2" placeholder="管理員密碼" />
+                      {actionErrorMsg && <p className="text-red-500 text-sm">{actionErrorMsg}</p>}
+                      <div className="flex justify-end gap-2">
+                        <button type="button" onClick={closeModals} className="px-4 py-2 bg-gray-200 rounded">取消</button>
+                        <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded">新增</button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              )}
+
+              {isDeleteModalOpen && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                  <div className="bg-white rounded-xl p-6 w-full max-w-sm shadow-2xl">
+                    <h3 className="text-xl font-bold mb-4 text-red-600">確認刪除</h3>
+                    <form onSubmit={handleDeleteSubmit} className="space-y-4">
+                      <input type="password" required value={passwordInput} onChange={e => setPasswordInput(e.target.value)} className="w-full border rounded p-2" placeholder="刪除密碼" />
+                      {actionErrorMsg && <p className="text-red-500 text-sm">{actionErrorMsg}</p>}
+                      <div className="flex justify-end gap-2">
+                        <button type="button" onClick={closeModals} className="px-4 py-2 bg-gray-200 rounded">取消</button>
+                        <button type="submit" className="px-4 py-2 bg-red-600 text-white rounded">刪除</button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              )}
+
+            </div>
+          );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<OPATDashboard />);
+    </script>
+</body>
+</html>
